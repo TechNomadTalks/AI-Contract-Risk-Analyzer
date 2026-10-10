@@ -9,7 +9,6 @@ import { clsx } from 'clsx';
 
 interface ClauseCardProps {
   clause: Clause;
-  onClick?: () => void;
 }
 
 const riskIcons = {
@@ -18,7 +17,7 @@ const riskIcons = {
   low: Info,
 };
 
-export function ClauseCard({ clause, onClick }: ClauseCardProps) {
+export function ClauseCard({ clause }: ClauseCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const RiskIcon = riskIcons[clause.riskLevel];
   const riskColor = getRiskLevelColor(clause.riskLevel);

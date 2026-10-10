@@ -4,6 +4,8 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: true,
   },
+  turbopack: {},
+  outputFileTracingRoot: __dirname,
   webpack: (config, { isServer }) => {
     if (!isServer) {
       config.resolve.fallback = {

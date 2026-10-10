@@ -7,14 +7,13 @@ import { extractText, cleanText } from '@/lib/text-extraction';
 import { detectClauses, calculateOverallRiskScore } from '@/lib/clause-detection';
 import { analyzeDocument, checkOllamaStatus } from '@/lib/ollama';
 import { ContractDocument } from '@/types';
-import { FileText, Clock, AlertTriangle } from 'lucide-react';
+import { FileText, Clock } from 'lucide-react';
 
 export default function Home() {
   const {
     documents,
     currentDocument,
     isProcessing,
-    setDocuments,
     addDocument,
     updateDocument,
     setCurrentDocument,

@@ -88,7 +88,7 @@ export function UploadZone({ onFileSelect, isProcessing }: UploadZoneProps) {
         ) : (
           <div className="flex gap-3">
             <FileText className="w-10 h-10 text-[#94a3b8]" />
-            <Image className="w-10 h-10 text-[#94a3b8]" />
+            <Image className="w-10 h-10 text-[#94a3b8]" alt="" />
             <Upload className="w-10 h-10 text-[#6366f1]" />
           </div>
         )}

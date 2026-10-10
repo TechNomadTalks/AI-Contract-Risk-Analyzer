@@ -3,7 +3,11 @@
 import { Shield, Server, Settings, Wifi, WifiOff } from 'lucide-react';
 import { useAppStore } from '@/store';
 
-export function Header() {
+interface HeaderProps {
+  onSettingsClick?: () => void;
+}
+
+export function Header({ onSettingsClick }: HeaderProps) {
   const { ollamaConnected, ollamaModel } = useAppStore();
   
   return (
@@ -35,7 +39,10 @@ export function Header() {
             <Server className="w-4 h-4 text-[#94a3b8] ml-2" />
           </div>
           
-          <button className="p-2 rounded-lg hover:bg-[#12121a] transition-colors">
+          <button 
+            onClick={onSettingsClick}
+            className="p-2 rounded-lg hover:bg-[#12121a] transition-colors"
+          >
             <Settings className="w-5 h-5 text-[#94a3b8]" />
           </button>
         </div>

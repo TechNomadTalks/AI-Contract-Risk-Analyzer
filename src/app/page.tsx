@@ -1,11 +1,12 @@
 'use client';
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import { useAppStore } from '@/store';
-import { Header, UploadZone, DocumentCard, AnalysisPanel } from '@/components';
+import { Header, UploadZone, DocumentCard, AnalysisPanel, SettingsModal } from '@/components';
 import { extractText, cleanText } from '@/lib/text-extraction';
 import { detectClauses, calculateOverallRiskScore } from '@/lib/clause-detection';
-import { analyzeDocument, checkOllamaStatus } from '@/lib/ollama';
+import { analyzeDocument, checkOllamaStatus, initializeSettings } from '@/lib/ollama';
+import { getDocuments, saveDocument, deleteDocument as dbDeleteDocument } from '@/lib/database';
 import { ContractDocument } from '@/types';
 import { FileText, Clock } from 'lucide-react';
 
@@ -21,15 +22,37 @@ export default function Home() {
     setOllamaStatus,
     removeDocument,
   } = useAppStore();
+  
+  const [showSettings, setShowSettings] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    const checkOllama = async () => {
+    const loadDocuments = async () => {
+      try {
+        const savedDocs = await getDocuments();
+        if (savedDocs.length > 0) {
+          savedDocs.forEach(doc => addDocument(doc));
+          setCurrentDocument(savedDocs[0]);
+        }
+      } catch (error) {
+        console.error('Failed to load documents:', error);
+      } finally {
+        setHydrated(true);
+      }
+    };
+
+    loadDocuments();
+  }, [addDocument, setCurrentDocument]);
+
+  useEffect(() => {
+    const init = async () => {
+      await initializeSettings();
       const status = await checkOllamaStatus();
       setOllamaStatus(status.connected, status.model);
     };
-    checkOllama();
+    init();
     
-    const interval = setInterval(checkOllama, 30000);
+    const interval = setInterval(init, 30000);
     return () => clearInterval(interval);
   }, [setOllamaStatus]);
 
@@ -72,6 +95,11 @@ export default function Home() {
           summary: analysis.summary,
         })),
       });
+      
+      const updatedDoc = useAppStore.getState().documents.find(d => d.id === doc.id);
+      if (updatedDoc) {
+        await saveDocument(updatedDoc);
+      }
       
       setProcessing(false);
     } catch (error) {
@@ -130,17 +158,38 @@ export default function Home() {
     setProcessing(false);
   }, [addDocument, updateDocument, setProcessing, processDocument, setCurrentDocument]);
 
-  const handleDeleteDocument = useCallback((id: string) => {
+  const handleDeleteDocument = useCallback(async (id: string) => {
     removeDocument(id);
+    try {
+      await dbDeleteDocument(id);
+    } catch (error) {
+      console.error('Failed to delete from database:', error);
+    }
   }, [removeDocument]);
 
   const sortedDocuments = [...documents].sort(
     (a, b) => new Date(b.uploadedAt).getTime() - new Date(a.uploadedAt).getTime()
   );
 
+  if (!hydrated) {
+    return (
+      <div className="min-h-screen bg-[#0a0a0f] flex items-center justify-center">
+        <div className="text-center">
+          <div className="w-12 h-12 border-4 border-[#6366f1] border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+          <p className="text-[#94a3b8]">Loading documents...</p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#0a0a0f]">
-      <Header />
+      <Header onSettingsClick={() => setShowSettings(true)} />
+      
+      <SettingsModal 
+        isOpen={showSettings} 
+        onClose={() => setShowSettings(false)} 
+      />
       
       <main className="pt-16 h-screen flex">
         <aside className="w-80 border-r border-[#2e2e3a] flex flex-col bg-[#0a0a0f]">
@@ -190,7 +239,7 @@ export default function Home() {
                 Upload a contract to analyze potential risks. The AI will extract text, 
                 identify key clauses, and provide a risk assessment.
               </p>
-              <div className="flex items-center gap-6 text-sm text-[#94a3b8]">
+              <div className="flex items-center gap-6 text-sm text-[#94a3b8] flex-wrap justify-center">
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full bg-[#22c55e]" />
                   <span>Tesseract OCR</span>
@@ -202,6 +251,10 @@ export default function Home() {
                 <div className="flex items-center gap-2">
                   <div className="w-2 h-2 rounded-full bg-[#8b5cf6]" />
                   <span>Local LLM</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-[#f59e0b]" />
+                  <span>Skill Tree</span>
                 </div>
               </div>
             </div>

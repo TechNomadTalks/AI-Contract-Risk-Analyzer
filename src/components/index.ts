@@ -4,3 +4,4 @@ export { ClauseCard } from './ClauseCard';
 export { RiskGauge } from './RiskGauge';
 export { AnalysisPanel } from './AnalysisPanel';
 export { Header } from './Header';
+export { SettingsModal } from './SettingsModal';

@@ -1,12 +1,99 @@
 import { Clause, OllamaAnalysis, RiskLevel } from '@/types';
+import { SkillNode, getSettings, saveSettings, buildPromptFromSkills, getDefaultSkillTree } from './database';
 
-const OLLAMA_BASE_URL = process.env.NEXT_PUBLIC_OLLAMA_URL || 'http://localhost:11434';
+const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
+const RECOMMENDED_MODELS = [
+  'llama3.1:8b',
+  'llama3.1:12b',
+  'llama3.2:8b',
+  'llama3.2:12b',
+  'mistral:7b',
+  'mistral:12b',
+  'qwen2.5:7b',
+  'qwen2.5:12b',
+  'phi3:14b',
+  'gemma2:9b',
+  'gemma2:12b',
+];
 
-export async function checkOllamaStatus(): Promise<{ connected: boolean; model?: string; error?: string }> {
+let cachedSettings: {
+  ollamaUrl: string;
+  ollamaModel: string;
+  customApiUrl?: string;
+  customApiKey?: string;
+  useCustomApi: boolean;
+  skillTree: SkillNode[];
+} | null = null;
+
+export async function initializeSettings(userId: string = 'default'): Promise<void> {
   try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
+    cachedSettings = await getSettings(userId);
+  } catch {
+    cachedSettings = {
+      ollamaUrl: DEFAULT_OLLAMA_URL,
+      ollamaModel: 'llama3.1:8b',
+      useCustomApi: false,
+      skillTree: getDefaultSkillTree(),
+    };
+  }
+}
+
+export function getCurrentSettings() {
+  return cachedSettings || {
+    ollamaUrl: DEFAULT_OLLAMA_URL,
+    ollamaModel: 'llama3.1:8b',
+    useCustomApi: false,
+    skillTree: getDefaultSkillTree(),
+  };
+}
+
+export function getOllamaUrl(): string {
+  return getCurrentSettings().ollamaUrl;
+}
+
+export function getOllamaModel(): string {
+  return getCurrentSettings().ollamaModel;
+}
+
+export function getRecommendedModels(): string[] {
+  return RECOMMENDED_MODELS;
+}
+
+export async function updateOllamaSettings(settings: { url?: string; model?: string }, userId: string = 'default'): Promise<void> {
+  if (cachedSettings) {
+    if (settings.url) cachedSettings.ollamaUrl = settings.url;
+    if (settings.model) cachedSettings.ollamaModel = settings.model;
+    await saveSettings(userId, { ollamaUrl: cachedSettings.ollamaUrl, ollamaModel: cachedSettings.ollamaModel });
+  }
+}
+
+export async function updateCustomApiSettings(settings: { url?: string; key?: string; enabled?: boolean }, userId: string = 'default'): Promise<void> {
+  if (cachedSettings) {
+    if (settings.url !== undefined) cachedSettings.customApiUrl = settings.url;
+    if (settings.key !== undefined) cachedSettings.customApiKey = settings.key;
+    if (settings.enabled !== undefined) cachedSettings.useCustomApi = settings.enabled;
+    await saveSettings(userId, { 
+      customApiUrl: cachedSettings.customApiUrl, 
+      customApiKey: cachedSettings.customApiKey, 
+      useCustomApi: cachedSettings.useCustomApi 
+    });
+  }
+}
+
+export async function updateSkillTree(skillTree: SkillNode[], userId: string = 'default'): Promise<void> {
+  if (cachedSettings) {
+    cachedSettings.skillTree = skillTree;
+    await saveSettings(userId, { skillTree });
+  }
+}
+
+export async function checkOllamaStatus(url?: string): Promise<{ connected: boolean; model?: string; models?: string[]; error?: string }> {
+  const baseUrl = url || getOllamaUrl();
+  try {
+    const response = await fetch(`${baseUrl}/api/tags`, {
       method: 'GET',
       headers: { 'Content-Type': 'application/json' },
+      signal: AbortSignal.timeout(5000),
     });
     
     if (!response.ok) {
@@ -14,9 +101,14 @@ export async function checkOllamaStatus(): Promise<{ connected: boolean; model?:
     }
     
     const data = await response.json();
-    const model = data.models?.[0]?.name || 'llama2';
+    const models = data.models || [];
+    const modelNames = models.map((m: { name: string }) => m.name);
     
-    return { connected: true, model };
+    return { 
+      connected: true, 
+      model: modelNames[0] || 'llama3.1:8b',
+      models: modelNames,
+    };
   } catch (error) {
     return { 
       connected: false, 
@@ -25,37 +117,29 @@ export async function checkOllamaStatus(): Promise<{ connected: boolean; model?:
   }
 }
 
-const ANALYSIS_PROMPT = `You are a legal contract analyst. Analyze the following contract clause and provide a risk assessment.
-
-Clause Type: {clauseType}
-Clause Text:
-{clauseText}
-
-Provide your analysis in JSON format:
-{{
-  "summary": "2-3 sentence summary of the clause and its implications",
-  "riskFactors": ["specific risk factor 1", "specific risk factor 2"],
-  "recommendations": ["recommendation 1", "recommendation 2"],
-  "confidence": 0.0-1.0
-}}
-
-Only respond with valid JSON.`;
-
-async function analyzeWithOllama(text: string, clauseType: string): Promise<OllamaAnalysis | null> {
+async function analyzeWithOllama(text: string, clauseType: string, model?: string, baseUrl?: string): Promise<OllamaAnalysis | null> {
+  const settings = getCurrentSettings();
+  const ollamaUrl = baseUrl || settings.ollamaUrl;
+  const ollamaModel = model || settings.ollamaModel;
+  
+  const skillTree = settings.skillTree;
+  const prompt = buildPromptFromSkills(skillTree, text, clauseType);
+  
   try {
-    const prompt = ANALYSIS_PROMPT
-      .replace('{clauseType}', clauseType)
-      .replace('{clauseText}', text.substring(0, 2000));
-    
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+    const response = await fetch(`${ollamaUrl}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'llama2',
+        model: ollamaModel,
         prompt,
         stream: false,
         format: 'json',
+        options: {
+          temperature: 0.1,
+          top_p: 0.9,
+        },
       }),
+      signal: AbortSignal.timeout(120000),
     });
     
     if (!response.ok) {
@@ -83,6 +167,64 @@ async function analyzeWithOllama(text: string, clauseType: string): Promise<Olla
     }
   } catch (error) {
     console.error('Ollama analysis error:', error);
+    return null;
+  }
+}
+
+async function analyzeWithCustomApi(text: string, clauseType: string): Promise<OllamaAnalysis | null> {
+  const settings = getCurrentSettings();
+  
+  if (!settings.useCustomApi || !settings.customApiUrl) {
+    return null;
+  }
+  
+  const skillTree = settings.skillTree;
+  const prompt = buildPromptFromSkills(skillTree, text, clauseType);
+  
+  try {
+    const response = await fetch(settings.customApiUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(settings.customApiKey ? { 'Authorization': `Bearer ${settings.customApiKey}` } : {}),
+      },
+      body: JSON.stringify({
+        model: settings.customApiUrl.includes('openai') ? 'gpt-4' : 'custom',
+        messages: [
+          { role: 'system', content: 'You are an expert legal contract analyst. Respond only with valid JSON.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.1,
+        response_format: { type: 'json_object' },
+      }),
+      signal: AbortSignal.timeout(120000),
+    });
+    
+    if (!response.ok) {
+      return null;
+    }
+    
+    const data = await response.json();
+    const content = data.choices?.[0]?.message?.content || data.response || data.text || '';
+    
+    try {
+      const parsed = JSON.parse(content);
+      return {
+        summary: parsed.summary || '',
+        recommendations: parsed.recommendations || [],
+        topRisks: parsed.riskFactors || [],
+        confidence: parsed.confidence || 0.5,
+      };
+    } catch {
+      return {
+        summary: content.substring(0, 200),
+        recommendations: [],
+        topRisks: [],
+        confidence: 0.3,
+      };
+    }
+  } catch (error) {
+    console.error('Custom API analysis error:', error);
     return null;
   }
 }
@@ -146,11 +288,15 @@ function generateRuleBasedAnalysis(clause: Clause): OllamaAnalysis {
 }
 
 export async function analyzeClause(clause: Clause): Promise<OllamaAnalysis> {
-  const ollamaResult = await analyzeWithOllama(clause.text, clause.type);
+  const settings = getCurrentSettings();
   
-  if (ollamaResult) {
-    return ollamaResult;
+  if (settings.useCustomApi && settings.customApiUrl) {
+    const customResult = await analyzeWithCustomApi(clause.text, clause.type);
+    if (customResult) return customResult;
   }
+  
+  const ollamaResult = await analyzeWithOllama(clause.text, clause.type);
+  if (ollamaResult) return ollamaResult;
   
   return generateRuleBasedAnalysis(clause);
 }

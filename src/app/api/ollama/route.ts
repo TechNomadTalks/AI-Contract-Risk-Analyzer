@@ -1,28 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
-
-const OLLAMA_BASE_URL = process.env.NEXT_PUBLIC_OLLAMA_URL || 'http://localhost:11434';
+import { initializeSettings, checkOllamaStatus, getRecommendedModels, getCurrentSettings, updateOllamaSettings, updateCustomApiSettings, updateSkillTree, analyzeClause } from '@/lib/ollama';
+import { Clause } from '@/types';
 
 export async function GET() {
   try {
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-    });
+    await initializeSettings();
+    const status = await checkOllamaStatus();
+    const models = getRecommendedModels();
     
-    if (!response.ok) {
-      return NextResponse.json(
-        { connected: false, error: 'Failed to connect to Ollama' },
-        { status: response.status }
-      );
-    }
-    
-    const data = await response.json();
-    const models = data.models || [];
+    const settings = getCurrentSettings();
     
     return NextResponse.json({
-      connected: true,
-      models: models.map((m: { name: string }) => m.name),
-      defaultModel: models[0]?.name || 'llama2',
+      connected: status.connected,
+      models: status.models || [],
+      availableModels: models,
+      currentModel: settings.ollamaModel,
+      ollamaUrl: settings.ollamaUrl,
+      useCustomApi: settings.useCustomApi,
+      customApiUrl: settings.customApiUrl,
+      skillTree: settings.skillTree,
+      error: status.error,
     });
   } catch (error) {
     return NextResponse.json(
@@ -37,8 +34,27 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    await initializeSettings();
+    
     const body = await request.json();
-    const { text, clauseType, model } = body;
+    const { text, clauseType, action, settings: bodySettings, skillTree } = body;
+    
+    if (action === 'update-settings') {
+      if (bodySettings) {
+        await updateOllamaSettings(bodySettings);
+      }
+      if (skillTree) {
+        await updateSkillTree(skillTree);
+      }
+      return NextResponse.json({ success: true });
+    }
+    
+    if (action === 'update-custom-api') {
+      if (bodySettings) {
+        await updateCustomApiSettings(bodySettings);
+      }
+      return NextResponse.json({ success: true });
+    }
     
     if (!text) {
       return NextResponse.json(
@@ -47,54 +63,20 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const prompt = `You are a legal contract analyst. Analyze the following contract clause and provide a risk assessment.
-
-Clause Type: ${clauseType || 'General'}
-Clause Text:
-${text.substring(0, 2000)}
-
-Provide your analysis in JSON format:
-{
-  "summary": "2-3 sentence summary of the clause",
-  "riskFactors": ["specific risk factor 1", "risk factor 2"],
-  "recommendations": ["recommendation 1", "recommendation 2"],
-  "confidence": 0.0-1.0
-}
-
-Only respond with valid JSON.`;
+    const clause: Clause = {
+      id: `temp-${Date.now()}`,
+      documentId: 'temp',
+      type: (clauseType as Clause['type']) || 'other',
+      text,
+      startIndex: 0,
+      endIndex: text.length,
+      riskLevel: 'low',
+      riskFactors: [],
+      summary: '',
+    };
     
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: model || 'llama2',
-        prompt,
-        stream: false,
-        format: 'json',
-      }),
-    });
-    
-    if (!response.ok) {
-      return NextResponse.json(
-        { error: 'Ollama request failed' },
-        { status: response.status }
-      );
-    }
-    
-    const data = await response.json();
-    const content = data.response || data.text || '';
-    
-    try {
-      const parsed = JSON.parse(content);
-      return NextResponse.json(parsed);
-    } catch {
-      return NextResponse.json({
-        summary: content.substring(0, 200),
-        riskFactors: [],
-        recommendations: [],
-        confidence: 0.3,
-      });
-    }
+    const result = await analyzeClause(clause);
+    return NextResponse.json(result);
   } catch (error) {
     console.error('Ollama API error:', error);
     return NextResponse.json(

@@ -1,11 +1,12 @@
 'use client';
 
 import { useState } from 'react';
-import { FileText, List, AlertTriangle, CheckCircle, Loader2 } from 'lucide-react';
+import { FileText, List, AlertTriangle, CheckCircle, Loader2, Download } from 'lucide-react';
 import { ContractDocument } from '@/types';
 import { RiskGauge } from './RiskGauge';
 import { ClauseCard } from './ClauseCard';
 import { clsx } from 'clsx';
+import { downloadAnalysisPDF } from '@/lib/pdf-export';
 
 interface AnalysisPanelProps {
   document: ContractDocument;
@@ -15,6 +16,18 @@ type Tab = 'overview' | 'clauses' | 'fulltext';
 
 export function AnalysisPanel({ document }: AnalysisPanelProps) {
   const [activeTab, setActiveTab] = useState<Tab>('overview');
+  const [exporting, setExporting] = useState(false);
+  
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      await downloadAnalysisPDF(document, document.analysis);
+    } catch (error) {
+      console.error('Export failed:', error);
+    } finally {
+      setExporting(false);
+    }
+  };
   
   const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
     { id: 'overview', label: 'Overview', icon: FileText },
@@ -48,25 +61,36 @@ export function AnalysisPanel({ document }: AnalysisPanelProps) {
   
   return (
     <div className="h-full flex flex-col">
-      <div className="flex border-b border-[#2e2e3a]">
-        {tabs.map((tab) => {
-          const Icon = tab.icon;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={clsx(
-                'flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors',
-                activeTab === tab.id
-                  ? 'text-[#6366f1] border-b-2 border-[#6366f1]'
-                  : 'text-[#94a3b8] hover:text-[#f8fafc]'
-              )}
-            >
-              <Icon className="w-4 h-4" />
-              {tab.label}
-            </button>
-          );
-        })}
+      <div className="flex items-center justify-between border-b border-[#2e2e3a]">
+        <div className="flex">
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={clsx(
+                  'flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors',
+                  activeTab === tab.id
+                    ? 'text-[#6366f1] border-b-2 border-[#6366f1]'
+                    : 'text-[#94a3b8] hover:text-[#f8fafc]'
+                )}
+              >
+                <Icon className="w-4 h-4" />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+        
+        <button
+          onClick={handleExport}
+          disabled={exporting}
+          className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-[#94a3b8] hover:text-[#f8fafc] transition-colors disabled:opacity-50"
+        >
+          <Download className="w-4 h-4" />
+          {exporting ? 'Exporting...' : 'Export PDF'}
+        </button>
       </div>
       
       <div className="flex-1 overflow-y-auto p-4">

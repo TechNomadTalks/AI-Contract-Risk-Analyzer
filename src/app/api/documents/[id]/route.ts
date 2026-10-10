@@ -1,21 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { resolve } from 'path';
-import { readFile, access, unlink } from 'fs/promises';
 import { verifyAuthToken } from '@/lib/auth';
+import { ref, getDownloadURL, deleteObject } from 'firebase/storage';
+import { storage } from '@/lib/firebase';
 
-const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'txt', 'png', 'jpg', 'jpeg', 'tiff', 'tif'] as const;
-type AllowedExtension = typeof ALLOWED_EXTENSIONS[number];
-
-const MIME_TYPES: Record<AllowedExtension, string> = {
-  pdf: 'application/pdf',
-  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  txt: 'text/plain',
-  png: 'image/png',
-  jpg: 'image/jpeg',
-  jpeg: 'image/jpeg',
-  tiff: 'image/tiff',
-  tif: 'image/tiff',
-};
+const ALLOWED_EXTENSIONS = ['pdf', 'docx', 'rtf', 'odt', 'txt', 'png', 'jpg', 'jpeg', 'tiff', 'tif'] as const;
 
 function sanitizeDocumentId(id: string): string {
   return id.replace(/[^a-zA-Z0-9-_]/g, '').substring(0, 100);
@@ -44,23 +32,24 @@ export async function GET(
       );
     }
 
-    const uploadDir = resolve(process.cwd(), 'uploads');
-    
+    // Find the file by checking each possible extension
     for (const ext of ALLOWED_EXTENSIONS) {
       const fileName = `${safeId}.${ext}`;
-      const filePath = resolve(uploadDir, fileName);
-      
-      if (!filePath.startsWith(uploadDir)) {
-        continue;
-      }
+      const filePath = `documents/${user.uid}/${fileName}`;
+      const fileRef = ref(storage, filePath);
       
       try {
-        await access(filePath);
-        const buffer = await readFile(filePath);
+        const downloadURL = await getDownloadURL(fileRef);
+        // Fetch the file and stream it
+        const response = await fetch(downloadURL);
+        if (!response.ok) continue;
+        
+        const buffer = await response.arrayBuffer();
+        const contentType = response.headers.get('content-type') || 'application/octet-stream';
         
         return new NextResponse(buffer, {
           headers: {
-            'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+            'Content-Type': contentType,
             'Cache-Control': 'private, max-age=3600',
           },
         });
@@ -105,20 +94,15 @@ export async function DELETE(
       );
     }
 
-    const uploadDir = resolve(process.cwd(), 'uploads');
     let deleted = false;
     
     for (const ext of ALLOWED_EXTENSIONS) {
       const fileName = `${safeId}.${ext}`;
-      const filePath = resolve(uploadDir, fileName);
-      
-      if (!filePath.startsWith(uploadDir)) {
-        continue;
-      }
+      const filePath = `documents/${user.uid}/${fileName}`;
+      const fileRef = ref(storage, filePath);
       
       try {
-        await access(filePath);
-        await unlink(filePath);
+        await deleteObject(fileRef);
         deleted = true;
       } catch {
         continue;

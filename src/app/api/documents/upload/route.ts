@@ -1,20 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir } from 'fs/promises';
-import { join } from 'path';
-import { existsSync } from 'fs';
 import { fileTypeFromBuffer } from 'file-type';
 import { verifyAuthToken } from '@/lib/auth';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { storage } from '@/lib/firebase';
 
 const MAX_FILE_SIZE = 25 * 1024 * 1024; // 25MB
 const ALLOWED_MIME_TYPES = new Set([
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/rtf',
+  'application/vnd.oasis.opendocument.text',
   'text/plain',
+  'text/rtf',
   'image/png',
   'image/jpeg',
   'image/tiff',
 ]);
-const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'png', 'jpg', 'jpeg', 'tiff', 'tif']);
+const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'rtf', 'odt', 'txt', 'png', 'jpg', 'jpeg', 'tiff', 'tif']);
 
 function sanitizeDocumentId(id: string): string {
   return id.replace(/[^a-zA-Z0-9-_]/g, '').substring(0, 100);
@@ -61,31 +63,26 @@ export async function POST(request: NextRequest) {
 
     if (!ALLOWED_MIME_TYPES.has(mimeType) || !ALLOWED_EXTENSIONS.has(extension)) {
       return NextResponse.json(
-        { error: `File type not allowed. Allowed types: PDF, DOCX, TXT, PNG, JPG, TIFF` },
+        { error: `File type not allowed. Allowed types: PDF, DOCX, RTF, ODT, TXT, PNG, JPG, TIFF` },
         { status: 400 }
       );
-    }
-
-    const uploadDir = join(process.cwd(), 'uploads');
-    
-    if (!existsSync(uploadDir)) {
-      await mkdir(uploadDir, { recursive: true });
     }
 
     const safeDocumentId = sanitizeDocumentId(documentId);
     const safeFileName = sanitizeFileName(`${safeDocumentId}.${extension}`);
-    
-    const resolvedUploadDir = join(process.cwd(), 'uploads');
-    const resolvedFilePath = join(resolvedUploadDir, safeFileName);
-    
-    if (!resolvedFilePath.startsWith(resolvedUploadDir)) {
-      return NextResponse.json(
-        { error: 'Invalid file path' },
-        { status: 400 }
-      );
-    }
-    
-    await writeFile(resolvedFilePath, buffer);
+    const filePath = `documents/${user.uid}/${safeFileName}`;
+
+    const fileRef = ref(storage, filePath);
+    await uploadBytes(fileRef, buffer, {
+      contentType: mimeType,
+      customMetadata: {
+        originalName: file.name,
+        documentId: safeDocumentId,
+        userId: user.uid,
+      },
+    });
+
+    const downloadURL = await getDownloadURL(fileRef);
     
     return NextResponse.json({
       success: true,
@@ -93,6 +90,8 @@ export async function POST(request: NextRequest) {
       fileName: safeFileName,
       mimeType,
       size: file.size,
+      storagePath: filePath,
+      downloadURL,
     });
   } catch (error) {
     console.error('Upload error:', error);

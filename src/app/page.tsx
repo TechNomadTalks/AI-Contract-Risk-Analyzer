@@ -5,7 +5,7 @@ import { useAppStore } from '@/store';
 import { Header, UploadZone, DocumentCard, AnalysisPanel, SettingsModal } from '@/components';
 import { extractText, cleanText } from '@/lib/text-extraction';
 import { detectClauses, calculateOverallRiskScore } from '@/lib/clause-detection';
-import { analyzeDocument, checkOllamaStatus, initializeSettings } from '@/lib/ollama';
+import { analyzeDocument } from '@/lib/ollama';
 import { getDocuments, saveDocument, deleteDocument as dbDeleteDocument } from '@/lib/database';
 import { ContractDocument } from '@/types';
 import { FileText, Clock } from 'lucide-react';
@@ -45,14 +45,22 @@ export default function Home() {
   }, [addDocument, setCurrentDocument]);
 
   useEffect(() => {
-    const init = async () => {
-      await initializeSettings();
-      const status = await checkOllamaStatus();
-      setOllamaStatus(status.connected, status.model);
+    const checkOllama = async () => {
+      try {
+        const response = await fetch('/api/ollama');
+        if (response.ok) {
+          const data = await response.json();
+          setOllamaStatus(data.connected, data.currentModel || data.model);
+        } else {
+          setOllamaStatus(false);
+        }
+      } catch {
+        setOllamaStatus(false);
+      }
     };
-    init();
+    checkOllama();
     
-    const interval = setInterval(init, 30000);
+    const interval = setInterval(checkOllama, 30000);
     return () => clearInterval(interval);
   }, [setOllamaStatus]);
 
@@ -65,9 +73,14 @@ export default function Home() {
       const fileBlob = await fileResponse.blob();
       const file = new File([fileBlob], doc.fileName, { type: doc.fileType });
       
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 120000);
+      
       const extracted = await extractText(file, (progress) => {
         setProcessing(true, { stage: 'ocr', progress, message: 'Extracting text...' });
-      });
+      }, abortController.signal);
+      
+      clearTimeout(timeoutId);
       
       if (!extracted.success) {
         throw new Error(extracted.error || 'Text extraction failed');
@@ -105,6 +118,13 @@ export default function Home() {
     } catch (error) {
       console.error('Processing error:', error);
       updateDocument(doc.id, { status: 'error' });
+      
+      try {
+        await fetch(`/api/documents/${doc.id}`, { method: 'DELETE' });
+      } catch (deleteError) {
+        console.error('Failed to delete file after processing error:', deleteError);
+      }
+      
       setProcessing(false);
     }
   }, [updateDocument, setProcessing]);
@@ -113,7 +133,7 @@ export default function Home() {
     setProcessing(true, { stage: 'upload', progress: 0, message: 'Uploading...' });
     
     for (const file of files) {
-      const docId = `doc-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      const docId = `doc-${crypto.randomUUID()}`;
       
       const newDoc: ContractDocument = {
         id: docId,

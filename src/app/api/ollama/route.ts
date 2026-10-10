@@ -1,9 +1,18 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { initializeSettings, checkOllamaStatus, getRecommendedModels, getCurrentSettings, updateOllamaSettings, updateCustomApiSettings, updateSkillTree, analyzeClause } from '@/lib/ollama';
-import { Clause } from '@/types';
+import { initializeSettings, checkOllamaStatus, getRecommendedModels, getCurrentSettings, updateOllamaSettings, updateCustomApiSettings, updateSkillTree, analyzeWithOllama as serverAnalyzeWithOllama } from '@/lib/ollama';
+import { analyzeWithCustomApiServer } from '@/lib/server/custom-api';
+import { verifyAuthToken } from '@/lib/auth';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
+    const user = await verifyAuthToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
     await initializeSettings();
     const status = await checkOllamaStatus();
     const models = getRecommendedModels();
@@ -34,10 +43,18 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    const user = await verifyAuthToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
     await initializeSettings();
     
     const body = await request.json();
-    const { text, clauseType, action, settings: bodySettings, skillTree } = body;
+    const { text, clauseType, model, action, settings: bodySettings, skillTree } = body;
     
     if (action === 'update-settings') {
       if (bodySettings) {
@@ -63,20 +80,22 @@ export async function POST(request: NextRequest) {
       );
     }
     
-    const clause: Clause = {
-      id: `temp-${Date.now()}`,
-      documentId: 'temp',
-      type: (clauseType as Clause['type']) || 'other',
-      text,
-      startIndex: 0,
-      endIndex: text.length,
-      riskLevel: 'low',
-      riskFactors: [],
-      summary: '',
-    };
+    const currentSettings = getCurrentSettings();
     
-    const result = await analyzeClause(clause);
-    return NextResponse.json(result);
+    if (currentSettings.useCustomApi && currentSettings.customApiUrl) {
+      const result = await analyzeWithCustomApiServer(text, clauseType || 'General');
+      if (result) return NextResponse.json(result);
+    }
+    
+    const result = await serverAnalyzeWithOllama(text, clauseType || 'General', model || currentSettings.ollamaModel);
+    if (result) return NextResponse.json(result);
+    
+    return NextResponse.json({
+      summary: 'Analysis unavailable. Using rule-based fallback.',
+      riskFactors: ['AI analysis failed'],
+      recommendations: ['Check Ollama connection or configure custom API'],
+      confidence: 0.2,
+    });
   } catch (error) {
     console.error('Ollama API error:', error);
     return NextResponse.json(

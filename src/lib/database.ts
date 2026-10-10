@@ -4,16 +4,18 @@ import {
   setDoc, 
   getDoc, 
   getDocs, 
-  updateDoc, 
-  deleteDoc, 
   query, 
   orderBy, 
   where,
   serverTimestamp,
-  Timestamp
+  Timestamp,
+  writeBatch,
+  WriteBatch,
+  DocumentReference,
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { ContractDocument, Clause, OllamaAnalysis } from '@/types';
+import { z } from 'zod';
 
 const DOCUMENTS_COLLECTION = 'documents';
 const ANALYSES_COLLECTION = 'analyses';
@@ -59,6 +61,34 @@ export interface SkillNode {
   enabled: boolean;
   children: SkillNode[];
   parentId?: string;
+}
+
+const SkillNodeSchema = z.object({
+  id: z.string().min(1).max(100),
+  name: z.string().min(1).max(100),
+  description: z.string().max(500),
+  prompt: z.string().max(5000),
+  enabled: z.boolean(),
+  children: z.array(z.lazy(() => SkillNodeSchema)),
+  parentId: z.string().optional(),
+});
+
+function sanitizePrompt(prompt: string): string {
+  return prompt
+    .replace(/[<>]/g, '')
+    .replace(/javascript:/gi, '')
+    .replace(/on\w+\s*=/gi, '')
+    .substring(0, 5000);
+}
+
+function sanitizeSkillTree(tree: SkillNode[]): SkillNode[] {
+  return tree.map(node => ({
+    ...node,
+    name: node.name.substring(0, 100),
+    description: node.description.substring(0, 500),
+    prompt: sanitizePrompt(node.prompt),
+    children: sanitizeSkillTree(node.children),
+  }));
 }
 
 const DEFAULT_SKILL_TREE: SkillNode[] = [
@@ -109,6 +139,30 @@ const DEFAULT_SKILL_TREE: SkillNode[] = [
   }
 ];
 
+async function withTransaction<T>(fn: (batch: WriteBatch) => Promise<T>): Promise<T> {
+  const batch = writeBatch(db);
+  try {
+    const result = await fn(batch);
+    await batch.commit();
+    return result;
+  } catch (error) {
+    console.error('Transaction failed:', error);
+    throw error;
+  }
+}
+
+function addToBatch(batch: WriteBatch, ref: DocumentReference, data: Record<string, unknown>): void {
+  batch.set(ref, data);
+}
+
+function updateInBatch(batch: WriteBatch, ref: DocumentReference, data: Record<string, unknown>): void {
+  batch.update(ref, data);
+}
+
+function deleteInBatch(batch: WriteBatch, ref: DocumentReference): void {
+  batch.delete(ref);
+}
+
 export async function saveDocument(document: ContractDocument, userId?: string): Promise<void> {
   const storedDoc: StoredDocument = {
     id: document.id,
@@ -124,7 +178,9 @@ export async function saveDocument(document: ContractDocument, userId?: string):
     userId,
   };
 
-  await setDoc(doc(db, DOCUMENTS_COLLECTION, document.id), storedDoc);
+  await withTransaction(async (batch) => {
+    addToBatch(batch, doc(db, DOCUMENTS_COLLECTION, document.id), storedDoc);
+  });
 }
 
 export async function getDocument(id: string): Promise<ContractDocument | null> {
@@ -148,11 +204,19 @@ export async function getDocument(id: string): Promise<ContractDocument | null> 
   };
 }
 
-export async function getDocuments(userId?: string): Promise<ContractDocument[]> {
+export async function getDocuments(userId?: string, limit?: number, startAfter?: Timestamp): Promise<ContractDocument[]> {
   let q = query(collection(db, DOCUMENTS_COLLECTION), orderBy('uploadedAt', 'desc'));
   
   if (userId) {
     q = query(collection(db, DOCUMENTS_COLLECTION), where('userId', '==', userId), orderBy('uploadedAt', 'desc'));
+  }
+  
+  if (startAfter) {
+    q = query(q, where('uploadedAt', '<', startAfter));
+  }
+  
+  if (limit) {
+    q = query(q, limit(limit));
   }
   
   const snapshot = await getDocs(q);
@@ -174,19 +238,65 @@ export async function getDocuments(userId?: string): Promise<ContractDocument[]>
 }
 
 export async function updateDocumentStatus(id: string, status: ContractDocument['status']): Promise<void> {
-  await updateDoc(doc(db, DOCUMENTS_COLLECTION, id), { status });
+  await withTransaction(async (batch) => {
+    updateInBatch(batch, doc(db, DOCUMENTS_COLLECTION, id), { status });
+  });
 }
 
 export async function updateDocumentAnalysis(id: string, analysis: OllamaAnalysis): Promise<void> {
-  await updateDoc(doc(db, DOCUMENTS_COLLECTION, id), { analysis });
+  await withTransaction(async (batch) => {
+    updateInBatch(batch, doc(db, DOCUMENTS_COLLECTION, id), { analysis });
+  });
 }
 
 export async function updateDocumentClauses(id: string, clauses: Clause[], riskScore: number): Promise<void> {
-  await updateDoc(doc(db, DOCUMENTS_COLLECTION, id), { clauses, riskScore });
+  await withTransaction(async (batch) => {
+    updateInBatch(batch, doc(db, DOCUMENTS_COLLECTION, id), { clauses, riskScore });
+  });
+}
+
+export async function saveDocumentWithClausesAndAnalysis(
+  document: ContractDocument,
+  clauses: Clause[],
+  riskScore: number,
+  analysis?: OllamaAnalysis,
+  userId?: string
+): Promise<void> {
+  const storedDoc: StoredDocument = {
+    id: document.id,
+    fileName: document.fileName,
+    fileType: document.fileType,
+    fileSize: document.fileSize,
+    uploadedAt: Timestamp.fromDate(document.uploadedAt),
+    status: 'analyzed',
+    extractedText: document.extractedText,
+    riskScore,
+    clauses,
+    analysis,
+    userId,
+  };
+
+  const analysisId = `analysis-${document.id}-${Date.now()}`;
+  const analysisRef = doc(db, ANALYSES_COLLECTION, analysisId);
+  
+  await withTransaction(async (batch) => {
+    addToBatch(batch, doc(db, DOCUMENTS_COLLECTION, document.id), storedDoc);
+    if (analysis) {
+      addToBatch(batch, analysisRef, {
+        id: analysisId,
+        documentId: document.id,
+        analysis,
+        createdAt: serverTimestamp(),
+        model: 'auto',
+      });
+    }
+  });
 }
 
 export async function deleteDocument(id: string): Promise<void> {
-  await deleteDoc(doc(db, DOCUMENTS_COLLECTION, id));
+  await withTransaction(async (batch) => {
+    deleteInBatch(batch, doc(db, DOCUMENTS_COLLECTION, id));
+  });
 }
 
 export async function saveAnalysis(documentId: string, analysis: OllamaAnalysis, model: string): Promise<void> {
@@ -217,7 +327,13 @@ export async function getSettings(userId: string): Promise<UserSettings> {
 }
 
 export async function saveSettings(userId: string, settings: Partial<UserSettings>): Promise<void> {
-  await setDoc(doc(db, SETTINGS_COLLECTION, userId), settings, { merge: true });
+  if (settings.skillTree) {
+    settings.skillTree = sanitizeSkillTree(settings.skillTree);
+  }
+  
+  await withTransaction(async (batch) => {
+    updateInBatch(batch, doc(db, SETTINGS_COLLECTION, userId), settings);
+  });
 }
 
 export function getDefaultSkillTree(): SkillNode[] {
@@ -226,13 +342,26 @@ export function getDefaultSkillTree(): SkillNode[] {
 
 export function flattenSkillTree(tree: SkillNode[]): SkillNode[] {
   const result: SkillNode[] = [];
+  const visited = new Set<string>();
+  const visiting = new Set<string>();
   
-  function traverse(nodes: SkillNode[]) {
+  function traverse(nodes: SkillNode[], path: string[] = []): void {
     for (const node of nodes) {
-      result.push(node);
-      if (node.children.length > 0) {
-        traverse(node.children);
+      if (visited.has(node.id)) continue;
+      
+      if (visiting.has(node.id)) {
+        throw new Error(`Cycle detected in skill tree: ${[...path, node.id].join(' -> ')}`);
       }
+      
+      visiting.add(node.id);
+      result.push(node);
+      
+      if (node.children.length > 0) {
+        traverse(node.children, [...path, node.id]);
+      }
+      
+      visiting.delete(node.id);
+      visited.add(node.id);
     }
   }
   
@@ -246,7 +375,7 @@ export function getEnabledSkills(tree: SkillNode[]): SkillNode[] {
 
 export function buildPromptFromSkills(skills: SkillNode[], clauseText: string, clauseType: string): string {
   const enabledSkills = getEnabledSkills(skills);
-  const skillPrompts = enabledSkills.map(s => s.prompt).join('\n\n');
+  const skillPrompts = enabledSkills.map(s => sanitizePrompt(s.prompt)).join('\n\n');
   
   return `${skillPrompts}
 

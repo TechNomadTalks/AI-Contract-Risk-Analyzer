@@ -1,14 +1,30 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getSettings, saveSettings, getDefaultSkillTree } from '@/lib/database';
+import { getSettings, saveSettings, getDefaultSkillTree, UserSettings } from '@/lib/database';
+import { verifyAuthToken } from '@/lib/auth';
+
+function sanitizeSettingsForClient(settings: UserSettings) {
+  const { customApiKey, ...safeSettings } = settings;
+  return {
+    ...safeSettings,
+    customApiKey: customApiKey ? '***' : undefined,
+    hasCustomApiKey: !!customApiKey,
+  };
+}
 
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId') || 'default';
-    
+    const user = await verifyAuthToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
+    const userId = user.uid;
     const settings = await getSettings(userId);
     
-    return NextResponse.json(settings);
+    return NextResponse.json(sanitizeSettingsForClient(settings));
   } catch {
     return NextResponse.json(
       { error: 'Failed to get settings' },
@@ -19,8 +35,17 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const user = await verifyAuthToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
+    const userId = user.uid;
     const body = await request.json();
-    const { userId = 'default', ...settings } = body;
+    const { ...settings } = body;
     
     await saveSettings(userId, settings);
     
@@ -35,8 +60,17 @@ export async function POST(request: NextRequest) {
 
 export async function PUT(request: NextRequest) {
   try {
+    const user = await verifyAuthToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
+    const userId = user.uid;
     const body = await request.json();
-    const { userId = 'default', skillTree } = body;
+    const { skillTree } = body;
     
     if (!skillTree) {
       return NextResponse.json(
@@ -58,8 +92,15 @@ export async function PUT(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url);
-    const userId = searchParams.get('userId') || 'default';
+    const user = await verifyAuthToken(request);
+    if (!user) {
+      return NextResponse.json(
+        { error: 'Authentication required' },
+        { status: 401 }
+      );
+    }
+
+    const userId = user.uid;
     
     await saveSettings(userId, { skillTree: getDefaultSkillTree() });
     

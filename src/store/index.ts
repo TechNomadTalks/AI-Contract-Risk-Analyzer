@@ -18,6 +18,15 @@ interface AppState {
   setOllamaStatus: (connected: boolean, model?: string) => void;
 }
 
+function findAndUpdate(documents: ContractDocument[], id: string, updates: Partial<ContractDocument>): ContractDocument | null {
+  for (const doc of documents) {
+    if (doc.id === id) {
+      return { ...doc, ...updates };
+    }
+  }
+  return null;
+}
+
 export const useAppStore = create<AppState>((set) => ({
   documents: [],
   currentDocument: null,
@@ -32,14 +41,20 @@ export const useAppStore = create<AppState>((set) => ({
     documents: [document, ...state.documents],
   })),
   
-  updateDocument: (id, updates) => set((state) => ({
-    documents: state.documents.map((doc) =>
+  updateDocument: (id, updates) => set((state) => {
+    const updatedDocuments = state.documents.map((doc) =>
       doc.id === id ? { ...doc, ...updates } : doc
-    ),
-    currentDocument: state.currentDocument?.id === id
-      ? { ...state.currentDocument, ...updates }
-      : state.currentDocument,
-  })),
+    );
+    
+    const updatedCurrentDoc = findAndUpdate(updatedDocuments, id, updates);
+    
+    return {
+      documents: updatedDocuments,
+      currentDocument: state.currentDocument?.id === id 
+        ? updatedCurrentDoc 
+        : state.currentDocument,
+    };
+  }),
   
   removeDocument: (id) => set((state) => ({
     documents: state.documents.filter((doc) => doc.id !== id),

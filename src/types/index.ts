@@ -35,11 +35,7 @@ export interface ContractDocument {
   extractedText: string;
   riskScore: number;
   clauses: Clause[];
-  analysis?: {
-    summary: string;
-    recommendations: string[];
-    topRisks: string[];
-  };
+  analysis?: OllamaAnalysis;
 }
 
 export interface OllamaAnalysis {

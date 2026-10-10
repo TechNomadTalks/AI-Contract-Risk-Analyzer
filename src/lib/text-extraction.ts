@@ -7,7 +7,7 @@ export interface ExtractionResult {
 }
 
 let mammothModule: typeof import('mammoth') | null = null;
-let pdfParseModule: typeof import('pdf-parse') | null = null;
+let pdfParseModule: unknown = null;
 
 async function getMammoth() {
   if (!mammothModule) {
@@ -25,13 +25,27 @@ async function getPdfParse() {
 
 export async function extractTextFromImage(
   file: File,
-  onProgress?: (progress: number) => void
+  onProgress?: (progress: number) => void,
+  signal?: AbortSignal
 ): Promise<ExtractionResult> {
   try {
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     
-    const result = await Tesseract.recognize(buffer, 'eng', {
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('OCR timeout after 120 seconds'));
+      }, 120000);
+      
+      if (signal) {
+        signal.addEventListener('abort', () => {
+          clearTimeout(timeout);
+          reject(new Error('OCR aborted'));
+        }, { once: true });
+      }
+    });
+    
+    const ocrPromise = Tesseract.recognize(buffer, 'eng', {
       logger: (m) => {
         if (m.status === 'recognizing text' && onProgress) {
           onProgress(m.progress * 100);
@@ -39,11 +53,20 @@ export async function extractTextFromImage(
       },
     });
     
+    const result = await Promise.race([ocrPromise, timeoutPromise]);
+    
     return {
       text: result.data.text,
       success: true,
     };
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      return {
+        text: '',
+        success: false,
+        error: 'OCR aborted',
+      };
+    }
     return {
       text: '',
       success: false,
@@ -57,11 +80,13 @@ export async function extractTextFromPDF(file: File): Promise<ExtractionResult> 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     
-    const pdfModule = await getPdfParse();
-    const data = await pdfModule.default(buffer);
+    const pdfModule = await getPdfParse() as { PDFParse: new (options: { data: Uint8Array }) => { getText: () => Promise<{ text: string }>; destroy: () => Promise<void> } };
+    const parser = new pdfModule.PDFParse({ data: new Uint8Array(buffer) });
+    const textResult = await parser.getText();
+    await parser.destroy();
     
     return {
-      text: data.text,
+      text: textResult.text,
       success: true,
     };
   } catch (error) {

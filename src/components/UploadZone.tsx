@@ -88,7 +88,8 @@ export function UploadZone({ onFileSelect, isProcessing }: UploadZoneProps) {
         ) : (
           <div className="flex gap-3">
             <FileText className="w-10 h-10 text-[#94a3b8]" />
-            <Image className="w-10 h-10 text-[#94a3b8]" alt="" />
+            {/* eslint-disable-next-line jsx-a11y/alt-text -- Lucide icon, not img element */}
+            <Image className="w-10 h-10 text-[#94a3b8]" />
             <Upload className="w-10 h-10 text-[#6366f1]" />
           </div>
         )}

@@ -1,5 +1,7 @@
 import { Clause, OllamaAnalysis, RiskLevel } from '@/types';
 import { SkillNode, getSettings, saveSettings, buildPromptFromSkills, getDefaultSkillTree } from './database';
+import { z } from 'zod';
+import { getClauseConfig } from './risk-config';
 
 const DEFAULT_OLLAMA_URL = 'http://localhost:11434';
 const RECOMMENDED_MODELS = [
@@ -16,18 +18,46 @@ const RECOMMENDED_MODELS = [
   'gemma2:12b',
 ];
 
+const AnalysisResponseSchema = z.object({
+  summary: z.string().min(1).max(1000),
+  recommendations: z.array(z.string().min(1).max(500)).max(10),
+  topRisks: z.array(z.string().min(1).max(500)).max(10),
+  confidence: z.number().min(0).max(1),
+});
+
+function parseAndValidateAnalysis(content: string): OllamaAnalysis {
+  try {
+    const parsed = JSON.parse(content);
+    const validated = AnalysisResponseSchema.parse(parsed);
+    return validated;
+  } catch {
+    return {
+      summary: content.substring(0, 200),
+      recommendations: [],
+      topRisks: [],
+      confidence: 0.3,
+    };
+  }
+}
+
 let cachedSettings: {
   ollamaUrl: string;
   ollamaModel: string;
   customApiUrl?: string;
-  customApiKey?: string;
   useCustomApi: boolean;
   skillTree: SkillNode[];
 } | null = null;
 
 export async function initializeSettings(userId: string = 'default'): Promise<void> {
   try {
-    cachedSettings = await getSettings(userId);
+    const settings = await getSettings(userId);
+    cachedSettings = {
+      ollamaUrl: settings.ollamaUrl || DEFAULT_OLLAMA_URL,
+      ollamaModel: settings.ollamaModel || 'llama3.1:8b',
+      customApiUrl: settings.customApiUrl,
+      useCustomApi: settings.useCustomApi || false,
+      skillTree: settings.skillTree || getDefaultSkillTree(),
+    };
   } catch {
     cachedSettings = {
       ollamaUrl: DEFAULT_OLLAMA_URL,
@@ -67,14 +97,12 @@ export async function updateOllamaSettings(settings: { url?: string; model?: str
   }
 }
 
-export async function updateCustomApiSettings(settings: { url?: string; key?: string; enabled?: boolean }, userId: string = 'default'): Promise<void> {
+export async function updateCustomApiSettings(settings: { url?: string; enabled?: boolean }, userId: string = 'default'): Promise<void> {
   if (cachedSettings) {
     if (settings.url !== undefined) cachedSettings.customApiUrl = settings.url;
-    if (settings.key !== undefined) cachedSettings.customApiKey = settings.key;
     if (settings.enabled !== undefined) cachedSettings.useCustomApi = settings.enabled;
     await saveSettings(userId, { 
       customApiUrl: cachedSettings.customApiUrl, 
-      customApiKey: cachedSettings.customApiKey, 
       useCustomApi: cachedSettings.useCustomApi 
     });
   }
@@ -117,7 +145,7 @@ export async function checkOllamaStatus(url?: string): Promise<{ connected: bool
   }
 }
 
-async function analyzeWithOllama(text: string, clauseType: string, model?: string, baseUrl?: string): Promise<OllamaAnalysis | null> {
+export async function analyzeWithOllama(text: string, clauseType: string, model?: string, baseUrl?: string): Promise<OllamaAnalysis | null> {
   const settings = getCurrentSettings();
   const ollamaUrl = baseUrl || settings.ollamaUrl;
   const ollamaModel = model || settings.ollamaModel;
@@ -143,145 +171,40 @@ async function analyzeWithOllama(text: string, clauseType: string, model?: strin
     });
     
     if (!response.ok) {
-      return null;
+      throw new Error(`Ollama request failed with status ${response.status}`);
     }
     
     const data = await response.json();
     const content = data.response || data.text || '';
     
-    try {
-      const parsed = JSON.parse(content);
-      return {
-        summary: parsed.summary || '',
-        recommendations: parsed.recommendations || [],
-        topRisks: parsed.riskFactors || [],
-        confidence: parsed.confidence || 0.5,
-      };
-    } catch {
-      return {
-        summary: content.substring(0, 200),
-        recommendations: [],
-        topRisks: [],
-        confidence: 0.3,
-      };
-    }
+    return parseAndValidateAnalysis(content);
   } catch (error) {
     console.error('Ollama analysis error:', error);
     return null;
   }
 }
 
-async function analyzeWithCustomApi(text: string, clauseType: string): Promise<OllamaAnalysis | null> {
-  const settings = getCurrentSettings();
-  
-  if (!settings.useCustomApi || !settings.customApiUrl) {
-    return null;
-  }
-  
-  const skillTree = settings.skillTree;
-  const prompt = buildPromptFromSkills(skillTree, text, clauseType);
-  
-  try {
-    const response = await fetch(settings.customApiUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(settings.customApiKey ? { 'Authorization': `Bearer ${settings.customApiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: settings.customApiUrl.includes('openai') ? 'gpt-4' : 'custom',
-        messages: [
-          { role: 'system', content: 'You are an expert legal contract analyst. Respond only with valid JSON.' },
-          { role: 'user', content: prompt }
-        ],
-        temperature: 0.1,
-        response_format: { type: 'json_object' },
-      }),
-      signal: AbortSignal.timeout(120000),
-    });
-    
-    if (!response.ok) {
-      return null;
-    }
-    
-    const data = await response.json();
-    const content = data.choices?.[0]?.message?.content || data.response || data.text || '';
-    
-    try {
-      const parsed = JSON.parse(content);
-      return {
-        summary: parsed.summary || '',
-        recommendations: parsed.recommendations || [],
-        topRisks: parsed.riskFactors || [],
-        confidence: parsed.confidence || 0.5,
-      };
-    } catch {
-      return {
-        summary: content.substring(0, 200),
-        recommendations: [],
-        topRisks: [],
-        confidence: 0.3,
-      };
-    }
-  } catch (error) {
-    console.error('Custom API analysis error:', error);
-    return null;
-  }
-}
-
 function generateRuleBasedAnalysis(clause: Clause): OllamaAnalysis {
-  const typeRiskInfo: Record<string, { risks: string[]; recommendations: string[] }> = {
-    termination: {
-      risks: ['Unilateral termination rights', 'Short notice periods', 'Termination without cause'],
-      recommendations: ['Negotiate reasonable notice periods', 'Require written notice', 'Include termination for convenience clauses'],
-    },
-    liability: {
-      risks: ['Unlimited liability exposure', 'No caps on damages', 'Broad indemnification'],
-      recommendations: ['Negotiate liability caps', 'Include consequential damage exclusions', 'Carve-out exceptions'],
-    },
-    payment: {
-      risks: ['Long payment terms', 'Late fee provisions', 'Unlimited payment obligations'],
-      recommendations: ['Negotiate net 30 terms', 'Limit late fees', 'Include payment milestones'],
-    },
-    confidentiality: {
-      risks: ['Perpetual obligations', 'Broad definitions', 'Unlimited scope'],
-      recommendations: ['Add time limits', 'Narrow definition of confidential info', 'Include exclusions'],
-    },
-    intellectual_property: {
-      risks: ['IP ownership transfer', 'Broad license grants', 'Work-for-hire provisions'],
-      recommendations: ['Clarify IP ownership', 'Limit license scope', 'Negotiate retainment rights'],
-    },
-    force_majeure: {
-      risks: ['Broad force majeure definitions', 'Pandemic exclusions', 'Limited remedies'],
-      recommendations: ['Narrow definition', 'Include specific events', 'Add termination rights'],
-    },
-    governing_law: {
-      risks: ['Unfavorable jurisdiction', 'Mandatory arbitration', 'Foreign law'],
-      recommendations: ['Negotiate home jurisdiction', 'Specify arbitration rules', 'Choose familiar law'],
-    },
-    warranty: {
-      risks: ['Broad disclaimers', 'No warranty express', 'Extended warranty periods'],
-      recommendations: ['Add express warranties', 'Limit disclaimer scope', 'Negotiate warranty period'],
-    },
-    assignment: {
-      risks: ['Unrestricted assignment', 'Assignment without consent', 'Automatic assignment'],
-      recommendations: ['Require consent for assignment', 'Add notice requirements', 'Limit assignment rights'],
-    },
-    amendments: {
-      risks: ['Unilateral amendments', 'No amendment process', 'Oral modification allowed'],
-      recommendations: ['Require written amendments', 'Include change process', 'Specify approval requirements'],
-    },
-  };
+  const config = getClauseConfig(clause.type);
   
-  const info = typeRiskInfo[clause.type] || { risks: ['Review carefully'], recommendations: ['Seek legal counsel'] };
+  if (!config) {
+    return {
+      summary: `${clause.type.replace(/_/g, ' ')} clause with ${clause.riskLevel} risk level. Review carefully for potential issues.`,
+      recommendations: ['Seek legal counsel'],
+      topRisks: clause.riskFactors.length > 0 
+        ? clause.riskFactors.map(f => `Contains: "${f}"`)
+        : ['Review carefully'],
+      confidence: clause.riskLevel === 'high' ? 0.8 : clause.riskLevel === 'medium' ? 0.6 : 0.4,
+    };
+  }
   
   const specificRisks = clause.riskFactors.length > 0 
     ? clause.riskFactors.map(f => `Contains: "${f}"`)
-    : info.risks.slice(0, 2);
+    : config.fallbackRisks.slice(0, 2);
   
   return {
-    summary: `${clause.type.replace(/_/g, ' ')} clause with ${clause.riskLevel} risk level. ${info.risks[0] || 'Review carefully for potential issues.'}`,
-    recommendations: info.recommendations,
+    summary: `${config.title} clause with ${clause.riskLevel} risk level. ${config.fallbackRisks[0] || 'Review carefully for potential issues.'}`,
+    recommendations: config.fallbackRecommendations,
     topRisks: specificRisks,
     confidence: clause.riskLevel === 'high' ? 0.8 : clause.riskLevel === 'medium' ? 0.6 : 0.4,
   };
@@ -291,8 +214,19 @@ export async function analyzeClause(clause: Clause): Promise<OllamaAnalysis> {
   const settings = getCurrentSettings();
   
   if (settings.useCustomApi && settings.customApiUrl) {
-    const customResult = await analyzeWithCustomApi(clause.text, clause.type);
-    if (customResult) return customResult;
+    const response = await fetch('/api/ollama', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: clause.text,
+        clauseType: clause.type,
+        action: 'analyze',
+      }),
+    });
+    
+    if (response.ok) {
+      return response.json();
+    }
   }
   
   const ollamaResult = await analyzeWithOllama(clause.text, clause.type);
@@ -314,22 +248,30 @@ export async function analyzeDocument(
     };
   }
   
+  const results = await Promise.allSettled(
+    clauses.map((clause, index) => 
+      analyzeClause(clause).then(result => {
+        if (onProgress) onProgress(index + 1, clauses.length);
+        return result;
+      })
+    )
+  );
+  
   const allRisks: string[] = [];
   const allRecommendations: string[] = [];
   let totalConfidence = 0;
+  let successfulAnalyses = 0;
   
-  for (let i = 0; i < clauses.length; i++) {
-    const analysis = await analyzeClause(clauses[i]);
-    allRisks.push(...analysis.topRisks);
-    allRecommendations.push(...analysis.recommendations);
-    totalConfidence += analysis.confidence;
-    
-    if (onProgress) {
-      onProgress(i + 1, clauses.length);
+  for (const result of results) {
+    if (result.status === 'fulfilled') {
+      allRisks.push(...result.value.topRisks);
+      allRecommendations.push(...result.value.recommendations);
+      totalConfidence += result.value.confidence;
+      successfulAnalyses++;
     }
   }
   
-  const avgConfidence = totalConfidence / clauses.length;
+  const avgConfidence = successfulAnalyses > 0 ? totalConfidence / successfulAnalyses : 0;
   
   const highRiskClauses = clauses.filter(c => c.riskLevel === 'high');
   const summary = `Analyzed ${clauses.length} clauses. ${highRiskClauses.length} high-risk clause${highRiskClauses.length !== 1 ? 's' : ''} identified requiring attention.`;
